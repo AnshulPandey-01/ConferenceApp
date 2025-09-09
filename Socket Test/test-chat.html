@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Chat Test Client</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    :root{
+      --bg:#f3f6fb; --card:#ffffff; --muted:#6b7280;
+      --accent:#2563eb; --mine:#dcf8c6; --other:#ffffff;
+      --maxw:760px;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;padding:24px;background:linear-gradient(180deg,#eef2ff,white);font-family:Inter,system-ui,Segoe UI,Roboto,Arial,sans-serif;color:#111}
+    .wrap{max-width:var(--maxw);margin:0 auto;background:transparent}
+    .app{border-radius:12px;overflow:hidden;box-shadow:0 10px 30px rgba(2,6,23,0.08)}
+    header.app-header{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;background:var(--card);border-bottom:1px solid #eee}
+    .brand{display:flex;gap:12px;align-items:center}
+    .logo{width:40px;height:40px;border-radius:8px;background:linear-gradient(135deg,#60a5fa,#7c3aed);display:flex;align-items:center;justify-content:center;color:white;font-weight:700}
+    .title{font-weight:700}
+    .sub{font-size:12px;color:var(--muted)}
+    .status{display:flex;gap:10px;align-items:center}
+    .dot{width:10px;height:10px;border-radius:50%}
+    .dot.online{background:#22c55e}
+    .dot.off{background:#f97316}
+    .controls{display:flex;gap:8px;align-items:center}
+
+    .chat-area{display:flex;flex-direction:column;height:520px;background:var(--card)}
+    .messages{flex:1;padding:18px;overflow:auto;background:linear-gradient(180deg, #f9fbff, #fff);display:flex;flex-direction:column;gap:10px}
+    .msg{max-width:70%;padding:10px 12px;border-radius:12px;box-shadow:0 1px 0 rgba(0,0,0,0.03);word-wrap:break-word}
+    .msg.mine{align-self:flex-end;background:var(--mine);border-bottom-right-radius:4px}
+    .msg.other{align-self:flex-start;background:var(--other);border-bottom-left-radius:4px}
+    .meta-line{display:flex;gap:8px;align-items:center;font-size:12px;color:var(--muted);margin-bottom:6px}
+    .who{font-weight:700;color:#0f172a}
+    .time{font-size:11px;color:#94a3b8;margin-left:auto}
+
+    .composer{display:flex;gap:8px;padding:12px;border-top:1px solid #eee;background:var(--card)}
+    .composer input[type=text]{flex:1;padding:10px 12px;border-radius:8px;border:1px solid #e6e9ef;font-size:14px}
+    .small{width:160px}
+    .btn{background:var(--accent);color:white;padding:10px 12px;border-radius:8px;border:0;cursor:pointer;font-weight:600}
+    .btn.secondary{background:#eef2ff;color:var(--accent);border:1px solid #dbeafe}
+    .btn:disabled{opacity:0.6;cursor:not-allowed}
+    .note{padding:10px 14px;font-size:13px;color:var(--muted);background:#fbfdff;border-top:1px solid #f0f5ff}
+    @media (max-width:600px){.composer{flex-direction:column}.small{width:100%}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="app" role="application">
+      <header class="app-header">
+        <div class="brand">
+          <div class="logo">C</div>
+          <div>
+            <div class="title">Chat Test</div>
+            <div class="sub">Endpoint: <code>/chat</code> • Send: <code>/current/resume</code> • Subscribe: <code>/start/initial</code></div>
+          </div>
+        </div>
+
+        <div class="status">
+          <div id="statusDot" class="dot off" title="disconnected"></div>
+          <div id="statusText" class="sub">Disconnected</div>
+        </div>
+      </header>
+
+      <div class="chat-area" id="chatArea">
+        <div class="messages" id="messages"></div>
+
+        <div class="note" id="note">Open this page in two tabs to test two-way chat. Use Connect in both tabs.</div>
+
+        <div class="composer" role="region" aria-label="message composer">
+          <input id="name" class="small" type="text" placeholder="Your name" value="Client">
+          <input id="msg" type="text" placeholder="Type a message (Enter to send)" />
+          <button id="connectBtn" class="btn secondary">Connect</button>
+          <button id="sendBtn" class="btn" disabled>Send</button>
+          <button id="disconnectBtn" class="btn secondary" disabled>Disconnect</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/sockjs-client@1/dist/sockjs.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/stompjs/lib/stomp.min.js"></script>
+  <script>
+    // small, polished chat client using SockJS + STOMP
+    const messagesEl = document.getElementById('messages');
+    const connectBtn = document.getElementById('connectBtn');
+    const sendBtn = document.getElementById('sendBtn');
+    const discBtn = document.getElementById('disconnectBtn');
+    const nameIn = document.getElementById('name');
+    const msgIn = document.getElementById('msg');
+    const statusDot = document.getElementById('statusDot');
+    const statusText = document.getElementById('statusText');
+
+    // unique id to let client ignore its own echoed messages
+    const clientId = Date.now().toString(36) + '-' + Math.floor(Math.random()*9999).toString(36);
+
+    let stompClient = null;
+    let connected = false;
+
+    function setStatus(connectedNow){
+      connected = !!connectedNow;
+      statusDot.classList.toggle('online', connected);
+      statusDot.classList.toggle('off', !connected);
+      statusText.textContent = connected ? 'Connected' : 'Disconnected';
+      sendBtn.disabled = !connected;
+      discBtn.disabled = !connected;
+      connectBtn.disabled = connected;
+    }
+
+    function timeNow() {
+      return new Date().toLocaleTimeString();
+    }
+
+    function addMessage({who, text, ts, mine}) {
+      const wrapper = document.createElement('div');
+      wrapper.className = 'msg ' + (mine ? 'mine' : 'other');
+      const meta = document.createElement('div');
+      meta.className = 'meta-line';
+      const whoEl = document.createElement('div'); whoEl.className='who'; whoEl.textContent = who;
+      const timeEl = document.createElement('div'); timeEl.className='time'; timeEl.textContent = new Date(ts).toLocaleTimeString();
+      meta.appendChild(whoEl); meta.appendChild(timeEl);
+      const body = document.createElement('div'); body.textContent = text;
+      wrapper.appendChild(meta); wrapper.appendChild(body);
+      messagesEl.appendChild(wrapper);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function safeParse(s){
+      try { return JSON.parse(s); } catch(e) { return null; }
+    }
+
+    connectBtn.addEventListener('click', () => {
+      if (stompClient && stompClient.connected) return;
+      // use SockJS HTTP URL to match your config
+      const sock = new SockJS('http://localhost:8080/chat');
+      stompClient = Stomp.over(sock);
+      stompClient.debug = () => {}; // silence verbose logs
+
+      stompClient.connect({}, frame => {
+        setStatus(true);
+        addMessage({who:'System', text:'Connected to server', ts:Date.now(), mine:false});
+        // subscribe to broker destination
+        stompClient.subscribe('/start/initial', msg => {
+          // msg.body should be JSON string if we send JSON; fallback to text
+          const parsed = safeParse(msg.body);
+          if (parsed && parsed.clientId === clientId) {
+            // ignore our own echoed message
+            return;
+          }
+          if (parsed) {
+            addMessage({who: parsed.who || 'Unknown', text: parsed.text || '', ts: parsed.ts || Date.now(), mine: false});
+          } else {
+            // fallback: plain text
+            addMessage({who:'Peer', text: msg.body, ts: Date.now(), mine: false});
+          }
+        });
+      }, err => {
+        setStatus(false);
+        addMessage({who:'System', text:'Connection error', ts:Date.now(), mine:false});
+        console.error('STOMP connect error', err);
+      });
+    });
+
+    sendBtn.addEventListener('click', () => {
+      if (!stompClient || !stompClient.connected) return;
+      const who = nameIn.value || 'Client';
+      const text = msgIn.value.trim();
+      if (!text) return;
+      const payload = { clientId, who, text, ts: Date.now() };
+      // send JSON so server echoes JSON string back
+      stompClient.send('/current/resume', {'content-type':'application/json'}, JSON.stringify(payload));
+      addMessage({who: who + ' (you)', text, ts: payload.ts, mine: true});
+      msgIn.value = '';
+      msgIn.focus();
+    });
+
+    discBtn.addEventListener('click', () => {
+      if (!stompClient) return;
+      try {
+        stompClient.disconnect(() => {
+          setStatus(false);
+          addMessage({who:'System', text:'Disconnected', ts:Date.now(), mine:false});
+        });
+      } catch(e){
+        console.warn('disconnect error', e);
+        setStatus(false);
+      }
+      stompClient = null;
+    });
+
+    // keyboard shortcuts: Enter send, Shift+Enter newline
+    msgIn.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendBtn.click();
+      }
+    });
+
+    // initial UI
+    setStatus(false);
+    // helpful hint
+    addMessage({who:'System', text:'Ready. Click Connect.', ts:Date.now(), mine:false});
+  </script>
+</body>
+</html>
